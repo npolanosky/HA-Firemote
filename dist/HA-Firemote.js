@@ -1495,15 +1495,18 @@ class FiremoteCard extends LitElement {
           .XM2 .dpadbutton,
           .XM .dpadbutton {
             background: rgb(28 28 28);
-            border: solid rgb(15 15 15) calc(var(--sz) * 0.03rem);
             outline: none;
             box-sizing: border-box;
+          }
+
+          .XM2 .dpadbutton:hover,
+          .XM .dpadbutton:hover {
+            background: rgb(34, 34, 34);
           }
 
           .XM2 .dpadbutton:active,
           .XM .dpadbutton:active {
             background: rgb(24 24 24);
-            border: solid #000 calc(var(--sz) * 0.15rem);
           }
 
           .chromecast-remote-body.CC1 .dpadbutton,
@@ -1588,6 +1591,14 @@ class FiremoteCard extends LitElement {
           .dpadbuttonShield {
             width: calc(var(--sz) * 4.101rem);
             height: calc(var(--sz) * 4.101rem);
+            outline: none;
+          }
+
+          .dpadbuttonShield:hover {
+            background: rgb(30, 30, 30);
+          }
+          .dpadbuttonShield:active {
+            background: rgb(25, 25, 25);
           }
 
           .centerbuttonShield {
@@ -4737,10 +4748,10 @@ class FiremoteCard extends LitElement {
 
 
           <button class="remote-button" id="back-button" @pointerdown=${this.buttonDown}>
-            <ha-icon icon="mdi:menu-left"></ha-icon>
+            <ha-icon icon="mdi:menu-left" style="transform: scale(1.5, 0.9);"></ha-icon>
           </button>
           <button class="remote-button${homeStatusClass}" id="home-button" @pointerdown=${this.buttonDown}>
-            <ha-icon icon="mdi:circle"></ha-icon>
+            <ha-icon icon="mdi:circle" style="transform: scale(0.9); margin-left: 1px;"></ha-icon>
           </button>
 
           <button class="remote-button" id="fastforward-button" @pointerdown=${this.buttonDown}>
@@ -6141,16 +6152,191 @@ class FiremoteCard extends LitElement {
             unsupportedButton();
             return;
           }
-          var text = prompt("Enter text to send");
-          if (text && text != '') {
-            if(['roku'].includes(deviceFamily)) {
-              _hass.callService("remote", "send_command", { entity_id: rokuRemoteEntity, command: 'Lit_'+text, num_repeats: 1, delay_secs: 0, hold_secs: 0});
+          // Roku keeps its one-shot prompt: the Roku remote integration has no
+          // live cursor/backspace editing, only the bulk "Lit_" literal command.
+          if(['roku'].includes(deviceFamily)) {
+            var rokuText = prompt("Enter text to send");
+            if (rokuText && rokuText != '') {
+              _hass.callService("remote", "send_command", { entity_id: rokuRemoteEntity, command: 'Lit_'+rokuText, num_repeats: 1, delay_secs: 0, hold_secs: 0});
             }
-            else {
-              var escapedText = text.replace(/"/g, "\\\"");
-              _hass.callService("androidtv", "adb_command", { entity_id: entity, command: 'input text "'+escapedText+'"' });
-            }
+            return;
           }
+
+          // ADB / Android TV families (nvidia-shield, onn, chromecast, xiaomi,
+          // amazon-fire): open a live editable on-screen keyboard. Every keystroke
+          // is forwarded to the device as it is typed, and dedicated controls give
+          // cursor + backspace control over the text already in the device's field.
+          // Works on desktop browsers and the Home Assistant iOS / Android apps.
+          (function openFiremoteKeyboard(){
+            // Android keyevent codes used for editing
+            var KEY = { DEL:67, FWDDEL:112, LEFT:21, RIGHT:22, HOME:122, END:123, ENTER:66, SPACE:62 };
+
+            function adb(cmd){
+              _hass.callService("androidtv", "adb_command", { entity_id: entity, command: cmd });
+            }
+            function sendKey(code){ adb('input keyevent '+code); }
+            function sendText(str){
+              if(str == null || str === ''){ return; }
+              // A lone space is more reliable as a keyevent than `input text " "`.
+              if(str === ' '){ sendKey(KEY.SPACE); return; }
+              // Escape characters special to the device shell (inside double quotes)
+              // then encode spaces as %s for Android's `input text`.
+              var esc = str.replace(/\\/g, '\\\\')
+                           .replace(/"/g, '\\"')
+                           .replace(/`/g, '\\`')
+                           .replace(/\$/g, '\\$')
+                           .replace(/ /g, '%s');
+              adb('input text "'+esc+'"');
+            }
+
+            // Replace any keyboard overlay left over from a previous press.
+            var existing = document.getElementById('firemote-keyboard-overlay');
+            if(existing){ existing.remove(); }
+
+            var overlay = document.createElement('div');
+            overlay.id = 'firemote-keyboard-overlay';
+            overlay.setAttribute('style', [
+              'position:fixed','inset:0','z-index:2147483646',
+              'display:flex','align-items:flex-end','justify-content:center',
+              'background:rgba(0,0,0,0.55)','padding:16px','box-sizing:border-box',
+              'font-family:inherit'
+            ].join(';'));
+
+            var panel = document.createElement('div');
+            panel.setAttribute('style', [
+              'background:var(--card-background-color,#1c1c1c)',
+              'color:var(--primary-text-color,#fff)',
+              'border-radius:14px','box-shadow:0 10px 40px rgba(0,0,0,0.5)',
+              'padding:16px','width:min(440px,100%)','box-sizing:border-box',
+              'margin-bottom:max(16px,env(safe-area-inset-bottom))'
+            ].join(';'));
+
+            var title = document.createElement('div');
+            title.textContent = 'Send keystrokes to ' + (deviceFamily ? deviceFamily.replace(/-/g,' ') : 'device');
+            title.setAttribute('style','font-size:15px;font-weight:600;margin-bottom:4px;text-transform:capitalize;');
+
+            var hint = document.createElement('div');
+            hint.textContent = 'Each keystroke is sent live. Use the buttons below to move the cursor or delete.';
+            hint.setAttribute('style','font-size:12px;opacity:0.7;margin-bottom:10px;');
+
+            var field = document.createElement('textarea');
+            field.setAttribute('rows','2');
+            field.setAttribute('autocapitalize','off');
+            field.setAttribute('autocorrect','off');
+            field.setAttribute('autocomplete','off');
+            field.setAttribute('spellcheck','false');
+            field.setAttribute('enterkeyhint','enter');
+            field.setAttribute('placeholder','Type here…');
+            field.setAttribute('style', [
+              'width:100%','box-sizing:border-box','font-size:16px','padding:10px',
+              'border-radius:8px','border:1px solid var(--divider-color,#444)',
+              'background:var(--primary-background-color,#111)','color:inherit',
+              'resize:none','outline:none'
+            ].join(';'));
+
+            var controls = document.createElement('div');
+            controls.setAttribute('style','display:flex;flex-wrap:wrap;gap:6px;margin-top:12px;');
+
+            function mkBtn(label, aria, handler){
+              var b = document.createElement('button');
+              b.type = 'button';
+              b.textContent = label;
+              b.setAttribute('aria-label', aria);
+              b.title = aria;
+              b.setAttribute('style', [
+                'flex:1 1 auto','min-width:44px','min-height:44px','font-size:18px',
+                'border-radius:8px','cursor:pointer',
+                'border:1px solid var(--divider-color,#444)',
+                'background:var(--secondary-background-color,#2a2a2a)','color:inherit'
+              ].join(';'));
+              // Keep focus on the textarea so the soft keyboard stays up on mobile.
+              b.addEventListener('pointerdown', function(ev){ ev.preventDefault(); });
+              b.addEventListener('click', function(ev){ ev.preventDefault(); handler(); field.focus(); });
+              return b;
+            }
+
+            controls.appendChild(mkBtn('⌫','Backspace',          function(){ sendKey(KEY.DEL); }));
+            controls.appendChild(mkBtn('⌦','Delete forward',     function(){ sendKey(KEY.FWDDEL); }));
+            controls.appendChild(mkBtn('←','Move cursor left',   function(){ sendKey(KEY.LEFT); }));
+            controls.appendChild(mkBtn('→','Move cursor right',  function(){ sendKey(KEY.RIGHT); }));
+            controls.appendChild(mkBtn('⇱','Move to start',      function(){ sendKey(KEY.HOME); }));
+            controls.appendChild(mkBtn('⇲','Move to end',        function(){ sendKey(KEY.END); }));
+            controls.appendChild(mkBtn('↵','Enter / submit',     function(){ sendKey(KEY.ENTER); }));
+
+            var footer = document.createElement('div');
+            footer.setAttribute('style','display:flex;justify-content:flex-end;margin-top:12px;');
+            var done = document.createElement('button');
+            done.type = 'button';
+            done.textContent = 'Done';
+            done.setAttribute('style', [
+              'padding:8px 18px','font-size:15px','border-radius:8px','cursor:pointer',
+              'border:none','background:var(--primary-color,#03a9f4)','color:#fff','font-weight:600'
+            ].join(';'));
+
+            function closeKeyboard(){
+              document.removeEventListener('keydown', escHandler, true);
+              overlay.remove();
+            }
+            function escHandler(ev){ if(ev.key === 'Escape'){ ev.stopPropagation(); closeKeyboard(); } }
+            done.addEventListener('click', closeKeyboard);
+            overlay.addEventListener('pointerdown', function(ev){ if(ev.target === overlay){ closeKeyboard(); } });
+            document.addEventListener('keydown', escHandler, true);
+            footer.appendChild(done);
+
+            // Skip live forwarding while an IME composition is in progress; the
+            // finished string is sent once on compositionend instead.
+            var composing = false;
+            field.addEventListener('compositionstart', function(){ composing = true; });
+            field.addEventListener('compositionend', function(ev){ composing = false; if(ev.data){ sendText(ev.data); } });
+
+            // beforeinput is the reliable cross-platform hook: it fires for hardware
+            // keyboards (desktop) and the iOS / Android soft keyboards alike.
+            field.addEventListener('beforeinput', function(ev){
+              if(ev.isComposing || composing){ return; }
+              var t = ev.inputType || '';
+              if(t === 'insertText' || t === 'insertReplacementText' || t === 'insertFromPaste' || t === 'insertCompositionText'){
+                if(ev.data != null){ sendText(ev.data); }
+                return; // let the textarea echo the character(s)
+              }
+              if(t === 'insertLineBreak' || t === 'insertParagraph'){
+                sendKey(KEY.ENTER);
+                ev.preventDefault(); // keep newlines out of the echo box
+                return;
+              }
+              if(t === 'deleteContentForward' || t === 'deleteWordForward' || t === 'deleteSoftLineForward'){
+                sendKey(KEY.FWDDEL);
+                return;
+              }
+              if(t.indexOf('delete') === 0){ // deleteContentBackward, deleteWordBackward, etc.
+                sendKey(KEY.DEL);
+                return;
+              }
+            });
+
+            // Caret movement produces no input event, so forward arrows/home/end
+            // here (desktop hardware keyboards). The textarea caret still moves too.
+            field.addEventListener('keydown', function(ev){
+              switch(ev.key){
+                case 'ArrowLeft':  sendKey(KEY.LEFT);  break;
+                case 'ArrowRight': sendKey(KEY.RIGHT); break;
+                case 'Home':       sendKey(KEY.HOME);  break;
+                case 'End':        sendKey(KEY.END);   break;
+                default: return;
+              }
+            });
+
+            panel.appendChild(title);
+            panel.appendChild(hint);
+            panel.appendChild(field);
+            panel.appendChild(controls);
+            panel.appendChild(footer);
+            overlay.appendChild(panel);
+            document.body.appendChild(overlay);
+
+            // Focus synchronously within the press gesture so mobile raises the
+            // soft keyboard immediately.
+            field.focus();
+          })();
           return;
         };
         // Keyboard button hold
